@@ -66,3 +66,5 @@ class ClaimExtractedDTO:
     end_time: Optional[float] = None
     confidence: float = 0.85
     rationale: str = ""
+    entities: List[Dict[str, Any]] = field(default_factory=list)
+    coreference_notes: str = ""

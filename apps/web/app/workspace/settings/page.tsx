@@ -10,6 +10,7 @@ import { VoiceBriefingModal } from "@/components/VoiceBriefingModal";
 
 export default function SettingsAndHealthPage() {
   const [providerStatus, setProviderStatus] = useState<any>(null);
+  const [ollamaStatus, setOllamaStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [pingResult, setPingResult] = useState<any>(null);
   const [pinging, setPinging] = useState(false);
@@ -17,8 +18,12 @@ export default function SettingsAndHealthPage() {
   const fetchStatus = async () => {
     setLoading(true);
     try {
-      const data = await api.getProvidersStatus();
+      const [data, ollama] = await Promise.all([
+        api.getProvidersStatus(),
+        api.getOllamaStatus().catch(() => null)
+      ]);
       setProviderStatus(data);
+      setOllamaStatus(ollama);
     } catch (e: any) {
       console.error(e);
     } finally {
@@ -222,6 +227,87 @@ export default function SettingsAndHealthPage() {
                 <div className="flex justify-between">
                   <span className="text-[#F6F5F1]/40">Truth Verdict:</span>
                   <span className="text-[#C89448]">Human Analyst Required</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Ollama Local LLM & Nhost BaaS Architectural Selection */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Ollama Local Reasoning Card */}
+            <div className="p-5 rounded-xl bg-[#0B121D] border border-[#1E2C3D] space-y-4">
+              <div className="flex items-center justify-between">
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                  ollamaStatus?.status === "online"
+                    ? "bg-[#2A8C85]/20 text-[#2A8C85] border-[#2A8C85]/30"
+                    : "bg-[#18263A] text-[#F6F5F1]/50 border-[#1E2C3D]"
+                }`}>
+                  {ollamaStatus?.status === "online" ? "OLLAMA ENGINE ONLINE" : "OLLAMA OFFLINE (STANDBY)"}
+                </span>
+                <Cpu className="w-4 h-4 text-[#2A8C85]" />
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-[#F6F5F1]">Ollama Local Reasoning Provider</h4>
+                <p className="text-[11px] font-mono text-[#F6F5F1]/50 mt-0.5">
+                  Host: {ollamaStatus?.endpoint || "http://localhost:11434"} • Active: {ollamaStatus?.active_model || "llama3.2:3b"}
+                </p>
+              </div>
+
+              <div className="space-y-1.5 text-xs font-mono pt-3 border-t border-[#1E2C3D] text-[#F6F5F1]/70">
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">Installed Models:</span>
+                  <span className="text-[#F6F5F1]">
+                    {ollamaStatus?.available_models?.length ? ollamaStatus.available_models.join(", ") : "None detected locally"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">RAM Compatibility:</span>
+                  <span className="text-[#2A8C85]">8 GB Machine Optimized</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">Lightweight Recommendations:</span>
+                  <span className="text-[11px] text-[#C89448]">llama3.2:1b, llama3.2:3b, qwen2.5:1.5b</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">Output Mode:</span>
+                  <span>Strict Pydantic JSON Schema</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Nhost BaaS Architectural Selection Card */}
+            <div className="p-5 rounded-xl bg-[#0B121D] border border-[#1E2C3D] space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="px-2 py-0.5 rounded bg-[#2A8C85]/20 text-[#2A8C85] text-[10px] font-mono border border-[#2A8C85]/30">
+                  SELECTED BAAS ARCHITECTURE
+                </span>
+                <Shield className="w-4 h-4 text-[#2A8C85]" />
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-[#F6F5F1]">Nhost BaaS (PostgreSQL + S3 Storage)</h4>
+                <p className="text-[11px] font-mono text-[#F6F5F1]/50 mt-0.5">
+                  Evaluated against Appwrite • Decision: Nhost selected for Relational Integrity
+                </p>
+              </div>
+
+              <div className="space-y-1.5 text-xs font-mono pt-3 border-t border-[#1E2C3D] text-[#F6F5F1]/70">
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">Primary Database:</span>
+                  <span className="text-[#F6F5F1]">PostgreSQL (15 Relational Tables)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">File Storage:</span>
+                  <span>MinIO / AWS S3 Compatible</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">GraphQL API:</span>
+                  <span className="text-[#2A8C85]">Hasura GraphQL Engine</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#F6F5F1]/40">Evaluation Spec:</span>
+                  <span className="text-[#2A8C85]">docs/BACKEND_SELECTION.md</span>
                 </div>
               </div>
             </div>

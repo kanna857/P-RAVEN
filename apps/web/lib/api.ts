@@ -90,11 +90,13 @@ export const api = {
   },
 
   // Audio & Transcription
-  async uploadAudio(file: File, investigationId: string, sourceType = "upload") {
+  async uploadAudio(file: File, investigationId: string, sourceType = "upload", apply80hzFilter = true, applyNormalization = true) {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("investigation_id", investigationId);
     formData.append("source_type", sourceType);
+    formData.append("apply_80hz_filter", String(apply80hzFilter));
+    formData.append("apply_normalization", String(applyNormalization));
 
     const headers = getAuthHeader();
     const res = await fetch(`${API_BASE}/audio/upload`, {
@@ -108,6 +110,14 @@ export const api = {
       throw new Error(err.detail || "Upload failed");
     }
     return res.json();
+  },
+
+  async benchmarkAccuracy(referenceText: string, hypothesisText: string) {
+    return request<any>("/audio/benchmark-accuracy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reference_text: referenceText, hypothesis_text: hypothesisText })
+    });
   },
 
   async transcribeAudio(audioAssetId: string, languageCode = "indic-auto", model = "prisma-v3.0") {
@@ -170,7 +180,26 @@ export const api = {
     });
   },
 
+  async seniorReviewClaim(claimId: string, decision: "senior_approved" | "changes_requested", seniorNotes: string) {
+    return request<any>(`/claims/${claimId}/senior-review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision,
+        senior_notes: seniorNotes
+      })
+    });
+  },
+
   // Evidence
+  async crawlEvidence(url: string, claimId?: string, investigationId?: string) {
+    return request<any>("/evidence/crawl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, claim_id: claimId, investigation_id: investigationId })
+    });
+  },
+
   async addEvidence(data: {
     claim_id: string;
     title: string;
@@ -207,6 +236,14 @@ export const api = {
     });
   },
 
+  async approveReport(reportId: string, action: "approve" | "request_revision" = "approve", notes?: string) {
+    return request<any>(`/reports/${reportId}/approve`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, notes })
+    });
+  },
+
   async listReports(investigationId: string) {
     return request<any[]>(`/reports?investigation_id=${investigationId}`);
   },
@@ -227,6 +264,10 @@ export const api = {
   // Providers & Health
   async getProvidersStatus() {
     return request<any>("/providers/status");
+  },
+
+  async getOllamaStatus() {
+    return request<any>("/providers/ollama/status");
   },
 
   async testProviderConnection() {

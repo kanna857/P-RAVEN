@@ -12,12 +12,15 @@ interface EvidenceItem {
   evidence_id: string;
   title: string;
   url?: string;
+  canonical_url?: string;
   publisher?: string;
+  author?: string;
   publication_date?: string;
   excerpt?: string;
   reliability_tier: string;
   supports_or_refutes: string;
   relevance_rationale?: string;
+  provenance_sha256?: string;
 }
 
 export function EvidenceInspector({
@@ -31,6 +34,11 @@ export function EvidenceInspector({
 }) {
   const { selectedClaimId, setSelectedClaimId } = useRavenStore();
   const [isAdding, setIsAdding] = useState(false);
+  const [isCrawling, setIsCrawling] = useState(false);
+  const [crawlUrlInput, setCrawlUrlInput] = useState("");
+  const [crawlStatus, setCrawlStatus] = useState<string | null>(null);
+  const [crawlError, setCrawlError] = useState<string | null>(null);
+
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
   const [publisher, setPublisher] = useState("");
@@ -39,6 +47,30 @@ export function EvidenceInspector({
   const [tier, setTier] = useState("primary_verified");
   const [rationale, setRationale] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleCrawl = async () => {
+    if (!crawlUrlInput.trim()) return;
+    setIsCrawling(true);
+    setCrawlStatus("Validating anti-SSRF security boundary & fetching robots.txt...");
+    setCrawlError(null);
+
+    try {
+      setCrawlStatus("Executing Scrapy + Trafilatura structured article extraction...");
+      const res = await api.crawlEvidence(crawlUrlInput.trim(), selectedClaimId || undefined, investigationId);
+      
+      if (!res.success) {
+        setCrawlError(res.error || "Crawl failed");
+      } else {
+        setCrawlStatus(`Success! Extracted "${res.title || res.url}" with provenance SHA-256: ${res.provenance_hash?.slice(0, 12)}...`);
+        setCrawlUrlInput("");
+        onRefresh();
+      }
+    } catch (err: any) {
+      setCrawlError(err.message || "Failed to crawl target URL.");
+    } finally {
+      setIsCrawling(false);
+    }
+  };
 
   // Filter evidence by selected claim if one is picked
   const filteredEvidence = selectedClaimId
@@ -125,6 +157,37 @@ export function EvidenceInspector({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Scrapy Evidence Discovery Bar */}
+      <div className="p-3 bg-[#101B2B]/60 border-b border-[#1E2C3D] space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            type="url"
+            value={crawlUrlInput}
+            onChange={(e) => setCrawlUrlInput(e.target.value)}
+            placeholder="Crawl public evidence (e.g. https://kspcb.karnataka.gov.in/report.html)..."
+            className="flex-1 px-3 py-1.5 rounded bg-[#0B121D] border border-[#1E2C3D] text-xs text-[#F6F5F1] focus:outline-none focus:border-[#2A8C85]"
+          />
+          <button
+            type="button"
+            onClick={handleCrawl}
+            disabled={isCrawling || !crawlUrlInput.trim()}
+            className="px-3 py-1.5 rounded bg-[#18263A] hover:bg-[#1E2C3D] border border-[#2A8C85]/40 text-[#2A8C85] text-xs font-mono font-medium disabled:opacity-40 transition-colors whitespace-nowrap"
+          >
+            {isCrawling ? "Crawling..." : "Discover with Scrapy"}
+          </button>
+        </div>
+        {crawlStatus && (
+          <p className="text-[10px] font-mono text-[#2A8C85] bg-[#2A8C85]/10 p-1.5 rounded border border-[#2A8C85]/20">
+            {crawlStatus}
+          </p>
+        )}
+        {crawlError && (
+          <p className="text-[10px] font-mono text-[#E06C75] bg-[#E06C75]/10 p-1.5 rounded border border-[#E06C75]/20">
+            {crawlError}
+          </p>
+        )}
       </div>
 
       {/* Add Evidence Form */}
@@ -270,6 +333,14 @@ export function EvidenceInspector({
                 <p className="text-[11px] text-[#2A8C85]/90">
                   <span className="font-mono text-[10px] text-[#F6F5F1]/40 uppercase">Rationale:</span> {ev.relevance_rationale}
                 </p>
+              )}
+
+              {ev.provenance_sha256 && (
+                <div className="flex items-center gap-1.5 text-[9px] font-mono text-[#F6F5F1]/40 pt-1">
+                  <Shield className="w-2.5 h-2.5 text-[#2A8C85]" />
+                  <span>SHA256: {ev.provenance_sha256.slice(0, 16)}...</span>
+                  <span className="text-[#2A8C85]">• Scrapy Provenance Fingerprint</span>
+                </div>
               )}
 
               {ev.url && (

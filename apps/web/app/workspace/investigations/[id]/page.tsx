@@ -149,6 +149,11 @@ export default function InvestigationDetailPage() {
                     SAMPLE VERIFIED
                   </span>
                 )}
+                {claims.length > 0 && (
+                  <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#101B2B] text-[#2A8C85] border border-[#2A8C85]/30">
+                    Dual Review: {claims.filter(c => c.review_stage === "senior_approved").length}/{claims.length} ({Math.round((claims.filter(c => c.review_stage === "senior_approved").length / Math.max(1, claims.length)) * 100)}%)
+                  </span>
+                )}
               </div>
               <h1 className="text-base font-bold text-[#F6F5F1] tracking-tight">
                 {investigation.title}
@@ -285,6 +290,31 @@ export default function InvestigationDetailPage() {
                 <div className="p-3.5 rounded bg-[#101B2B] border border-[#1E2C3D]">
                   <h4 className="font-mono text-[10px] text-[#C89448] uppercase mb-1">LIMITATIONS & RTI CAVEATS</h4>
                   <p className="text-[#F6F5F1]/80 leading-relaxed">{generatedReport.limitations}</p>
+                </div>
+
+                <div className="p-3.5 rounded bg-[#0A1017] border border-[#1E2C3D] flex items-center justify-between">
+                  <div>
+                    <span className="font-mono text-[10px] text-[#F6F5F1]/50 uppercase block">APPROVAL WORKFLOW</span>
+                    <span className="text-xs font-semibold text-[#2A8C85] capitalize">
+                      Status: {generatedReport.approval_status?.replace("_", " ") || "Under Senior Review"}
+                    </span>
+                  </div>
+                  {generatedReport.approval_status !== "senior_approved" && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          await api.approveReport(generatedReport.id, "approve", "Report validated against official audit records.");
+                          setGeneratedReport({ ...generatedReport, approval_status: "senior_approved" });
+                          alert("Report successfully approved with Senior Analyst sign-off!");
+                        } catch (e: any) {
+                          alert(e.message);
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded bg-[#C89448] hover:bg-[#C89448]/90 text-black text-xs font-semibold"
+                    >
+                      Senior Reviewer Sign-Off
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

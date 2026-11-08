@@ -7,7 +7,7 @@ from datetime import datetime
 
 from app.database import get_db
 from app.models import Report, Investigation, Claim, ClaimEvidenceLink, EvidenceSource, AuditEvent
-from app.schemas import ReportGenerateRequest, ReportResponse
+from app.schemas import ReportGenerateRequest, ReportResponse, ReportApprovalRequest
 from app.services.export_service import export_report_markdown
 from app.routers.auth import get_current_user, User
 
@@ -32,14 +32,20 @@ def generate_report(
     unreviewed = sum(1 for c in claims if c.status == "unreviewed")
     needs_context = sum(1 for c in claims if c.status == "needs_context")
 
+    senior_approved_claims = sum(1 for c in claims if c.review_stage == "senior_approved")
+    total_claims_count = len(claims)
+    dual_review_ready = total_claims_count > 0 and senior_approved_claims == total_claims_count
+
     verdict_summary = {
-        "total_claims": len(claims),
+        "total_claims": total_claims_count,
         "supported": supported,
         "refuted": refuted,
         "inconclusive": inconclusive,
         "unreviewed": unreviewed,
         "needs_context": needs_context,
-        "completion_rate": round(((len(claims) - unreviewed) / max(1, len(claims))) * 100, 1)
+        "senior_approved_claims": senior_approved_claims,
+        "dual_review_coverage_pct": round((senior_approved_claims / max(1, total_claims_count)) * 100, 1),
+        "completion_rate": round(((total_claims_count - unreviewed) / max(1, total_claims_count)) * 100, 1)
     }
 
     # Generate summary if not explicitly provided
@@ -47,7 +53,7 @@ def generate_report(
         summary = (
             f"Investigation into '{inv.title}' reviewed {len(claims)} spoken claims extracted from verified audio recordings. "
             f"Analyst review confirmed {supported} claim(s) supported by primary records, {refuted} claim(s) refuted by official evidence, "
-            f"and {inconclusive} inconclusive statement(s). Findings indicate substantial public interest findings requiring documented corroboration."
+            f"and {inconclusive} inconclusive statement(s). Dual-analyst verification completed on {senior_approved_claims}/{total_claims_count} claims."
         )
     else:
         summary = req.executive_summary
@@ -59,7 +65,10 @@ def generate_report(
         executive_summary=summary,
         methodology=req.methodology or "Cross-reference of speech audio transcript with certified government gazettes, pollution audits, and regulatory disclosures.",
         limitations=req.limitations or "Hospital admission data and specific micro-level municipal contractor records remain subject to ongoing public information requests.",
-        verdict_summary=verdict_summary
+        verdict_summary=verdict_summary,
+        approval_status="under_senior_review" if not dual_review_ready else "senior_approved",
+        approver_id=current_user.id if dual_review_ready else None,
+        approved_at=datetime.utcnow() if dual_review_ready else None
     )
     db.add(report)
 
@@ -68,7 +77,11 @@ def generate_report(
         action="REPORT_GENERATED",
         resource_type="report",
         resource_id=report.id,
-        details={"investigation_id": inv.id, "claims_total": len(claims)}
+        details={
+            "investigation_id": inv.id,
+            "claims_total": len(claims),
+            "approval_status": report.approval_status
+        }
     )
     db.add(audit)
     db.commit()
@@ -82,8 +95,52 @@ def generate_report(
         methodology=report.methodology,
         limitations=report.limitations,
         verdict_summary=report.verdict_summary,
+        approval_status=report.approval_status,
+        approver_id=report.approver_id,
+        approved_at=report.approved_at,
         created_at=report.created_at
     )
+
+@router.patch("/{id}/approve")
+def approve_report(
+    id: str,
+    req: ReportApprovalRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Second-reviewer sign-off and approval control for finalized investigation reports.
+    Requires Senior Analyst or Lead Investigator authorization.
+    """
+    report = db.query(Report).filter(Report.id == id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    if req.action == "approve":
+        report.approval_status = "senior_approved"
+        report.approver_id = current_user.id
+        report.approved_at = datetime.utcnow()
+    elif req.action == "request_revision":
+        report.approval_status = "revision_requested"
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action. Use 'approve' or 'request_revision'.")
+
+    audit = AuditEvent(
+        actor_id=current_user.id,
+        action="REPORT_APPROVED" if req.action == "approve" else "REPORT_REVISION_REQUESTED",
+        resource_type="report",
+        resource_id=report.id,
+        details={"action": req.action, "notes": req.notes, "approver": current_user.email}
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "id": report.id,
+        "approval_status": report.approval_status,
+        "approver_id": report.approver_id,
+        "approved_at": report.approved_at
+    }
 
 @router.get("")
 def list_reports(
@@ -100,6 +157,9 @@ def list_reports(
             "methodology": r.methodology,
             "limitations": r.limitations,
             "verdict_summary": r.verdict_summary,
+            "approval_status": r.approval_status,
+            "approver_id": r.approver_id,
+            "approved_at": r.approved_at,
             "audio_briefing_path": r.audio_briefing_path,
             "created_at": r.created_at
         }

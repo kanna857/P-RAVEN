@@ -11,6 +11,12 @@ interface ClaimItem {
   category: string;
   uncertainty_score: number;
   status: string;
+  review_stage?: string;
+  senior_reviewer_id?: string;
+  senior_notes?: string;
+  senior_signed_at?: string;
+  entities?: any[];
+  coreference_notes?: string;
   order_index: number;
   evidence_count?: number;
   start_time?: number;
@@ -30,10 +36,32 @@ export function ClaimExplorer({
   const [filter, setFilter] = useState("all");
   const [isExtracting, setIsExtracting] = useState(false);
   const [reviewingClaim, setReviewingClaim] = useState<ClaimItem | null>(null);
+  const [seniorReviewingClaim, setSeniorReviewingClaim] = useState<ClaimItem | null>(null);
   const [decision, setDecision] = useState("verified_supported");
+  const [seniorDecision, setSeniorDecision] = useState<"senior_approved" | "changes_requested">("senior_approved");
+  const [seniorNotes, setSeniorNotes] = useState("");
   const [analystNotes, setAnalystNotes] = useState("");
   const [confidenceRating, setConfidenceRating] = useState(4);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSeniorReviewSubmit = async () => {
+    if (!seniorReviewingClaim || !seniorNotes.trim()) {
+      alert("Please provide senior review notes.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await api.seniorReviewClaim(seniorReviewingClaim.id, seniorDecision, seniorNotes);
+      setSeniorReviewingClaim(null);
+      setSeniorNotes("");
+      onRefresh();
+    } catch (e: any) {
+      alert("Senior review failed: " + e.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleExtract = async () => {
     setIsExtracting(true);
@@ -187,6 +215,19 @@ export function ClaimExplorer({
                     <span className="px-1.5 py-0.5 rounded bg-[#0B121D] text-[10px] font-mono text-[#F6F5F1]/60 uppercase border border-[#1E2C3D]">
                       {claim.category}
                     </span>
+                    {claim.review_stage === "senior_approved" ? (
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-950/60 text-[10px] font-mono text-emerald-400 border border-emerald-800/50">
+                        Senior Signed-Off
+                      </span>
+                    ) : claim.review_stage === "primary_adjudicated" ? (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-950/60 text-[10px] font-mono text-amber-400 border border-amber-800/50">
+                        Primary Adjudicated
+                      </span>
+                    ) : claim.review_stage === "changes_requested" ? (
+                      <span className="px-1.5 py-0.5 rounded bg-rose-950/60 text-[10px] font-mono text-rose-400 border border-rose-800/50">
+                        Changes Requested
+                      </span>
+                    ) : null}
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -217,15 +258,29 @@ export function ClaimExplorer({
                     <ArrowRight className="w-3 h-3" />
                   </button>
 
-                  <button
-                    onClick={() => {
-                      setReviewingClaim(claim);
-                      setDecision(claim.status !== "unreviewed" ? claim.status : "verified_supported");
-                    }}
-                    className="px-2.5 py-1 rounded bg-[#18263A] border border-[#1E2C3D] text-[11px] font-mono text-[#F6F5F1] hover:border-[#2A8C85]"
-                  >
-                    Adjudicate Claim
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {claim.review_stage === "primary_adjudicated" && (
+                      <button
+                        onClick={() => {
+                          setSeniorReviewingClaim(claim);
+                          setSeniorDecision("senior_approved");
+                        }}
+                        className="px-2.5 py-1 rounded bg-[#2A8C85]/20 border border-[#2A8C85]/40 text-[11px] font-mono text-[#2A8C85] hover:bg-[#2A8C85]/30"
+                      >
+                        Senior Sign-Off
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => {
+                        setReviewingClaim(claim);
+                        setDecision(claim.status !== "unreviewed" ? claim.status : "verified_supported");
+                      }}
+                      className="px-2.5 py-1 rounded bg-[#18263A] border border-[#1E2C3D] text-[11px] font-mono text-[#F6F5F1] hover:border-[#2A8C85]"
+                    >
+                      Adjudicate Claim
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -288,6 +343,65 @@ export function ClaimExplorer({
                 className="px-4 py-1.5 rounded bg-[#2A8C85] text-xs text-white font-medium hover:bg-[#2A8C85]/90 disabled:opacity-50"
               >
                 {isSubmitting ? "Saving..." : "Commit Verdict"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Second Analyst / Senior Review Modal */}
+      {seniorReviewingClaim && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg bg-[#0B121D] border border-[#1E2C3D] rounded-xl p-5 space-y-4 shadow-2xl">
+            <h4 className="text-sm font-semibold text-[#F6F5F1] flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-[#C89448]" />
+              <span>Senior Analyst Sign-Off (Dual Review)</span>
+            </h4>
+
+            <div className="p-3 rounded bg-[#101B2B] border border-[#1E2C3D] text-xs text-[#F6F5F1]/80 italic">
+              "{seniorReviewingClaim.claim_text}"
+            </div>
+
+            <div>
+              <label className="block text-xs font-mono text-[#F6F5F1]/60 mb-1.5">
+                SENIOR ADJUDICATION DECISION
+              </label>
+              <select
+                value={seniorDecision}
+                onChange={(e: any) => setSeniorDecision(e.target.value)}
+                className="w-full px-3 py-2 rounded bg-[#101B2B] border border-[#1E2C3D] text-xs text-[#F6F5F1]"
+              >
+                <option value="senior_approved">Sign-Off & Approve Determination</option>
+                <option value="changes_requested">Request Additional Evidentiary Review</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-mono text-[#F6F5F1]/60 mb-1.5">
+                SENIOR REVIEWER AUDIT NOTES
+              </label>
+              <textarea
+                value={seniorNotes}
+                onChange={(e) => setSeniorNotes(e.target.value)}
+                placeholder="Document verified regulatory sources, statutory cross-checks, or revision instructions..."
+                rows={4}
+                className="w-full p-2.5 rounded bg-[#101B2B] border border-[#1E2C3D] text-xs text-[#F6F5F1] focus:outline-none focus:border-[#2A8C85]"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setSeniorReviewingClaim(null)}
+                className="px-3 py-1.5 rounded bg-[#18263A] text-xs text-[#F6F5F1]/60 hover:text-[#F6F5F1]"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isSubmitting}
+                onClick={handleSeniorReviewSubmit}
+                className="px-4 py-1.5 rounded bg-[#C89448] text-xs text-black font-semibold hover:bg-[#C89448]/90 disabled:opacity-50"
+              >
+                {isSubmitting ? "Submitting..." : "Sign-Off Dual Review"}
               </button>
             </div>
           </div>

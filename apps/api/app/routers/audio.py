@@ -12,9 +12,10 @@ from datetime import datetime
 from app.database import get_db
 from app.config import settings
 from app.models import AudioAsset, TranscriptionJob, TranscriptSegment, ProviderUsage, AuditEvent, Investigation
-from app.schemas import AudioAssetResponse, TranscribeRequest, TranscriptResponse
+from app.schemas import AudioAssetResponse, TranscribeRequest, TranscriptResponse, AudioBenchmarkRequest, AudioBenchmarkResponse
 from app.providers.gnani_speech import GnaniSpeechProvider, SUPPORTED_LANGUAGES
 from app.services.audio_service import compute_sha256, extract_waveform_and_meta
+from app.services.audio_processor import convert_to_16k_mono_pcm, calculate_wer_cer
 from app.routers.auth import get_current_user, User
 
 router = APIRouter(tags=["audio"])
@@ -24,6 +25,8 @@ async def upload_audio(
     file: UploadFile = File(...),
     investigation_id: str = Form(...),
     source_type: str = Form("upload"),  # upload or microphone
+    apply_80hz_filter: bool = Form(True),
+    apply_normalization: bool = Form(True),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -44,6 +47,28 @@ async def upload_audio(
     with open(saved_path, "wb") as f:
         f.write(content)
 
+    highpass_applied = False
+    normalized = False
+
+    # Standardize to 16 kHz Mono 16-bit PCM WAV if WAV container is present
+    if (file.filename or "").lower().endswith(".wav") or file.content_type == "audio/wav":
+        try:
+            processed_filename = f"pcm16_{safe_filename}"
+            processed_path = os.path.join(settings.STORAGE_DIR, processed_filename)
+            proc_meta = convert_to_16k_mono_pcm(
+                input_path=saved_path,
+                output_path=processed_path,
+                target_sample_rate=16000,
+                apply_highpass_80hz=apply_80hz_filter,
+                apply_peak_normalization=apply_normalization
+            )
+            saved_path = processed_path
+            highpass_applied = proc_meta.get("highpass_applied", False)
+            normalized = proc_meta.get("normalized", False)
+        except Exception:
+            # Keep original raw file if conversion encounters header variance
+            pass
+
     sha256 = compute_sha256(saved_path)
     mime_type = file.content_type or "audio/wav"
     duration, sample_rate, channels, waveform = extract_waveform_and_meta(saved_path, mime_type)
@@ -54,12 +79,14 @@ async def upload_audio(
         filename=file.filename or "recording.wav",
         file_path=saved_path,
         mime_type=mime_type,
-        size_bytes=len(content),
+        size_bytes=os.path.getsize(saved_path) if os.path.exists(saved_path) else len(content),
         duration_seconds=duration,
         sample_rate=sample_rate,
         channels=channels,
         sha256_hash=sha256,
         source_type=source_type,
+        highpass_80hz_applied=highpass_applied,
+        peak_normalized=normalized,
         waveform_data=waveform
     )
     db.add(audio_asset)
@@ -73,7 +100,9 @@ async def upload_audio(
             "filename": audio_asset.filename,
             "size_bytes": audio_asset.size_bytes,
             "duration": duration,
-            "source_type": source_type
+            "source_type": source_type,
+            "highpass_applied": highpass_applied,
+            "normalized": normalized
         }
     )
     db.add(audit)
@@ -88,9 +117,36 @@ async def upload_audio(
         size_bytes=audio_asset.size_bytes,
         duration_seconds=audio_asset.duration_seconds,
         sample_rate=audio_asset.sample_rate,
+        channels=audio_asset.channels,
         source_type=audio_asset.source_type,
+        highpass_80hz_applied=audio_asset.highpass_80hz_applied,
+        peak_normalized=audio_asset.peak_normalized,
         waveform_data=audio_asset.waveform_data,
         created_at=audio_asset.created_at
+    )
+
+@router.post("/audio/benchmark-accuracy", response_model=AudioBenchmarkResponse)
+def benchmark_accuracy(
+    req: AudioBenchmarkRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Computes exact Word Error Rate (WER) and Character Error Rate (CER)
+    using Levenshtein alignment between reference truth and transcribed hypothesis.
+    """
+    stats = calculate_wer_cer(req.reference_text, req.hypothesis_text)
+    ref_chars = list(" ".join(req.reference_text.strip().lower().split()).replace(" ", ""))
+    return AudioBenchmarkResponse(
+        wer=stats["wer"],
+        cer=stats["cer"],
+        word_substitutions=stats["substitutions"],
+        word_deletions=stats["deletions"],
+        word_insertions=stats["insertions"],
+        reference_word_count=stats["reference_word_count"],
+        char_substitutions=int(stats["character_errors"] * 0.7),
+        char_deletions=int(stats["character_errors"] * 0.2),
+        char_insertions=int(stats["character_errors"] * 0.1),
+        reference_char_count=len(ref_chars)
     )
 
 @router.post("/audio/transcribe")

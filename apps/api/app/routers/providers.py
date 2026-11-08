@@ -9,7 +9,8 @@ from app.models import ProviderUsage
 from app.providers.gnani_speech import GnaniSpeechProvider
 from app.providers.gnani_tts import GnaniTTSProvider
 from app.providers.reasoning import ReasoningProvider
-from app.schemas import ProviderStatusResponse, ProviderStatusItem
+from app.providers.ollama_provider import OllamaProvider
+from app.schemas import ProviderStatusResponse, ProviderStatusItem, OllamaStatusResponse
 
 router = APIRouter(tags=["providers"])
 
@@ -18,6 +19,7 @@ def get_providers_status(db: Session = Depends(get_db)):
     speech = GnaniSpeechProvider()
     tts = GnaniTTSProvider()
     reasoning = ReasoningProvider()
+    ollama = OllamaProvider(host=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
 
     prisma_status = "active_ready" if speech.is_configured() else "demo_fallback_ready"
     timbre_status = "active_ready" if tts.is_configured() else "demo_fallback_ready"
@@ -64,9 +66,62 @@ def get_providers_status(db: Session = Depends(get_db)):
                 "open_weights": "gnani/gnani-evon-v3.3-30B-A3B"
             }
         ),
+        ollama=ProviderStatusItem(
+            provider_name="Ollama Local LLM Provider",
+            status="active_ready" if getattr(reasoning, "_ollama_available", False) else "standby_or_offline",
+            endpoint=settings.OLLAMA_BASE_URL,
+            model=settings.OLLAMA_MODEL,
+            auth_configured=True,
+            details={
+                "host": settings.OLLAMA_BASE_URL,
+                "active_model": settings.OLLAMA_MODEL,
+                "timeout_seconds": settings.OLLAMA_TIMEOUT_SECONDS,
+                "suitable_for_8gb_ram": True,
+                "recommended_lightweight": ["llama3.2:1b", "llama3.2:3b", "qwen2.5:1.5b"]
+            }
+        ),
         total_calls_logged=total_usages,
         system_time=datetime.utcnow().isoformat()
     )
+
+@router.get("/providers/ollama/status", response_model=OllamaStatusResponse)
+async def get_ollama_status():
+    """
+    Direct model discovery and health check against local Ollama instance.
+    Never pretends a model is installed when it is not.
+    """
+    ollama = OllamaProvider(host=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL)
+    health = await ollama.check_health()
+
+    if health.get("online"):
+        return OllamaStatusResponse(
+            status="online",
+            endpoint=ollama.host,
+            active_model=ollama.model,
+            available_models=health.get("installed_models", []),
+            is_installed=health.get("is_active_model_installed", False),
+            inference_timeout_seconds=int(ollama.timeout),
+            system_compatibility={
+                "8gb_ram_ready": True,
+                "recommended_models": health.get("recommended_lightweight", []),
+                "supports_structured_json": True
+            }
+        )
+    else:
+        return OllamaStatusResponse(
+            status="offline",
+            endpoint=ollama.host,
+            active_model=ollama.model,
+            available_models=[],
+            is_installed=False,
+            inference_timeout_seconds=int(ollama.timeout),
+            system_compatibility={
+                "8gb_ram_ready": True,
+                "recommended_models": health.get("recommended_lightweight", []),
+                "supports_structured_json": True
+            },
+            error=health.get("error", "Ollama daemon unreachable on localhost:11434")
+        )
 
 @router.post("/providers/test-connection")
 async def test_provider_connection():

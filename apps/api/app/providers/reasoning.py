@@ -2,9 +2,10 @@ import re
 import json
 import httpx
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from app.config import settings
 from app.providers.base import ClaimExtractedDTO, SegmentDTO
+from app.providers.ollama_provider import OllamaProvider
 
 logger = logging.getLogger("raven.providers.reasoning")
 
@@ -37,36 +38,104 @@ POLICY_PATTERNS = [
     r"\b(allocated|approved|grant|ordinance|scheme|act|mandate|regulation|guidelines|commissioner|minister)\b"
 ]
 
-class ReasoningProvider:
+class ReasoningEngine:
     """
-    Reasoning and claim extraction provider.
-    Supports:
-    1. Gnani Evon 30B (or compatible reasoning models) via OpenAI-compatible endpoints (vLLM / SGLang / Hosted).
-    2. Transparent Heuristic Linguistic Extractor when no LLM endpoint is provided.
+    Unified AI Reasoning & Epistemic Uncertainty Engine.
+    Abstracts across:
+      1. Local Ollama Models (Llama 3.2, Qwen 2.5, Mistral)
+      2. Gnani Evon 30B (Open-weight MoE serving via OpenAI-compatible endpoints)
+      3. Transparent Heuristic Fallback (clearly labeled)
     """
 
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
-        self.base_url = (base_url or settings.EVON_BASE_URL).rstrip("/") if (base_url or settings.EVON_BASE_URL) else None
-        self.api_key = api_key or settings.EVON_API_KEY
-        self.model_name = settings.EVON_MODEL_NAME
+    def __init__(
+        self,
+        ollama_host: Optional[str] = None,
+        ollama_model: Optional[str] = None,
+        evon_base_url: Optional[str] = None,
+        evon_api_key: Optional[str] = None
+    ):
+        self.ollama = OllamaProvider(host=ollama_host or settings.OLLAMA_HOST, model=ollama_model or settings.OLLAMA_MODEL)
+        self.evon_base_url = (evon_base_url or settings.EVON_BASE_URL).rstrip("/") if (evon_base_url or settings.EVON_BASE_URL) else None
+        self.evon_api_key = evon_api_key or settings.EVON_API_KEY
+        self.evon_model_name = settings.EVON_MODEL_NAME
 
     def is_evon_configured(self) -> bool:
-        return bool(self.base_url and len(self.base_url.strip()) > 5)
+        return bool(self.evon_base_url and len(self.evon_base_url.strip()) > 5)
 
-    async def extract_claims(self, segments: List[SegmentDTO]) -> List[ClaimExtractedDTO]:
-        if self.is_evon_configured():
+    async def get_active_provider_info(self) -> Dict[str, Any]:
+        """Returns the status of all reasoning providers."""
+        ollama_health = await self.ollama.check_health()
+        evon_active = bool(self.evon_base_url and len(self.evon_base_url.strip()) > 5)
+
+        active_name = "Heuristic Linguistic Extractor (Fallback)"
+        if ollama_health["online"] and ollama_health["is_active_model_installed"]:
+            active_name = f"Ollama Local ({self.ollama.model})"
+        elif evon_active:
+            active_name = f"Gnani Evon 30B ({self.evon_model_name})"
+
+        return {
+            "active_provider": active_name,
+            "ollama": ollama_health,
+            "evon": {
+                "configured": evon_active,
+                "endpoint": self.evon_base_url or "Not configured",
+                "model": self.evon_model_name
+            },
+            "heuristic_fallback_available": True
+        }
+
+    async def extract_claims(self, segments: List[SegmentDTO]) -> Tuple[List[ClaimExtractedDTO], str]:
+        """
+        Extracts checkable claims through the highest priority active engine.
+        Returns: (claims, engine_name)
+        """
+        # Priority 1: Ollama if online and model pulled
+        try:
+            ollama_health = await self.ollama.check_health()
+            if ollama_health["online"] and ollama_health["is_active_model_installed"]:
+                raw_claims = await self.ollama.extract_claims_and_entities(segments)
+                claims = []
+                for c in raw_claims:
+                    seg_idx = c.get("segment_index")
+                    start_t = None
+                    end_t = None
+                    if seg_idx is not None and 0 <= seg_idx < len(segments):
+                        start_t = segments[seg_idx].start_time
+                        end_t = segments[seg_idx].end_time
+
+                    claims.append(ClaimExtractedDTO(
+                        claim_text=c.get("claim_text", ""),
+                        category=c.get("category", "factual_assertion"),
+                        uncertainty_score=float(c.get("uncertainty_score", 0.2)),
+                        segment_index=seg_idx,
+                        start_time=start_t,
+                        end_time=end_t,
+                        confidence=0.92,
+                        rationale=c.get("coreference_notes") or f"Ollama ({self.ollama.model}) contextual claim extraction."
+                    ))
+                if claims:
+                    return claims, f"ollama_{self.ollama.model}"
+        except Exception as exc:
+            logger.warning(f"Ollama extraction failed, trying next provider: {exc}")
+
+        # Priority 2: Gnani Evon 30B via OpenAI-compatible endpoint
+        if self.evon_base_url:
             try:
-                return await self._extract_via_evon_api(segments)
-            except Exception as e:
-                logger.warning(f"Evon API call failed ({str(e)}), falling back to heuristic extractor.")
+                claims = await self._extract_via_evon_api(segments)
+                if claims:
+                    return claims, "gnani_evon_30b"
+            except Exception as exc:
+                logger.warning(f"Gnani Evon extraction failed: {exc}")
 
-        return self._extract_via_heuristics(segments)
+        # Priority 3: Transparent Heuristic Fallback
+        claims = self._extract_via_heuristics(segments)
+        return claims, "heuristic_syntactic_engine"
 
     async def _extract_via_evon_api(self, segments: List[SegmentDTO]) -> List[ClaimExtractedDTO]:
-        url = f"{self.base_url}/v1/chat/completions"
+        url = f"{self.evon_base_url}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.evon_api_key:
+            headers["Authorization"] = f"Bearer {self.evon_api_key}"
 
         transcript_text = "\n".join([f"[{s.order_index}] {s.text}" for s in segments])
 
@@ -79,7 +148,7 @@ class ReasoningProvider:
         )
 
         payload = {
-            "model": self.model_name,
+            "model": self.evon_model_name,
             "messages": [
                 {"role": "system", "content": "You extract checkable claims for evidence verification. Always output pure valid JSON."},
                 {"role": "user", "content": prompt}
@@ -87,13 +156,12 @@ class ReasoningProvider:
             "temperature": 0.1
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=35.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
             raw_content = data["choices"][0]["message"]["content"]
             
-            # Parse JSON block
             json_match = re.search(r"\[.*\]", raw_content, re.DOTALL)
             if json_match:
                 parsed = json.loads(json_match.group(0))
@@ -114,18 +182,17 @@ class ReasoningProvider:
                         start_time=start_t,
                         end_time=end_t,
                         confidence=0.9,
-                        rationale=c.get("rationale", "Extracted by Evon 30B reasoning model.")
+                        rationale=c.get("rationale", "Extracted by Gnani Evon 30B reasoning model.")
                     ))
                 return claims
 
-        return self._extract_via_heuristics(segments)
+        return []
 
     def _extract_via_heuristics(self, segments: List[SegmentDTO]) -> List[ClaimExtractedDTO]:
         claims: List[ClaimExtractedDTO] = []
 
         for seg in segments:
             text = seg.text.strip()
-            # Split into sub-sentences
             sentences = [s.strip() for s in re.split(r"[.!?]", text) if len(s.strip()) > 15]
 
             for sentence in sentences:
@@ -133,33 +200,31 @@ class ReasoningProvider:
                 category = "factual_assertion"
                 rationale = []
 
-                # Check statistical markers
+                # Statistical markers
                 for pattern in STATISTICAL_PATTERNS:
                     if re.search(pattern, sentence, re.IGNORECASE):
                         is_claim = True
                         category = "statistical"
-                        rationale.append("Contains quantifiable figures/amounts")
+                        rationale.append("Quantifiable figures or financial allocation")
                         break
 
-                # Check policy markers
+                # Policy markers
                 if not is_claim:
                     for pattern in POLICY_PATTERNS:
                         if re.search(pattern, sentence, re.IGNORECASE):
                             is_claim = True
                             category = "policy"
-                            rationale.append("Identified governance or budgetary declaration")
+                            rationale.append("Identified governance or statutory mandate")
                             break
 
-                # General declarative factual claim
+                # Factual event assertion
                 if not is_claim and len(sentence.split()) >= 6:
-                    # Look for verbs of assertion or action
                     if re.search(r"\b(declared|revealed|denied|registered|reported|tested|found|occurred)\b", sentence, re.IGNORECASE):
                         is_claim = True
                         category = "event"
-                        rationale.append("Verifiable event or official assertion")
+                        rationale.append("Verifiable historical or institutional assertion")
 
                 if is_claim:
-                    # Calculate uncertainty score based on hedge markers
                     uncertainty = 0.15
                     for word, weight in HEDGE_TERMS.items():
                         if re.search(rf"\b{word}\b", sentence, re.IGNORECASE):
@@ -174,7 +239,10 @@ class ReasoningProvider:
                         start_time=seg.start_time,
                         end_time=seg.end_time,
                         confidence=0.88,
-                        rationale="; ".join(rationale) if rationale else "Syntactic assertion extracted for evidence verification."
+                        rationale="; ".join(rationale) if rationale else "Heuristic syntactic fact extraction."
                     ))
 
         return claims
+
+# Backward-compatibility alias
+ReasoningProvider = ReasoningEngine

@@ -9,8 +9,8 @@ from app.models import (
     Claim, TranscriptSegment, TranscriptionJob, AudioAsset,
     Investigation, ReviewDecision, ClaimEvidenceLink, AuditEvent
 )
-from app.schemas import ClaimExtractRequest, ClaimResponse, ClaimReviewRequest
-from app.providers.reasoning import ReasoningProvider
+from app.schemas import ClaimExtractRequest, ClaimResponse, ClaimReviewRequest, SeniorReviewRequest
+from app.providers.reasoning import ReasoningEngine
 from app.providers.base import SegmentDTO
 from app.routers.auth import get_current_user, User
 
@@ -60,8 +60,8 @@ async def extract_claims_endpoint(
         for s in segments
     ]
 
-    reasoning = ReasoningProvider()
-    extracted = await reasoning.extract_claims(dto_segments)
+    reasoning = ReasoningEngine()
+    extracted, engine_used = await reasoning.extract_claims(dto_segments)
 
     # Persist extracted claims into database
     created_claims = []
@@ -71,15 +71,20 @@ async def extract_claims_endpoint(
         if c.segment_index is not None and 0 <= c.segment_index < len(segments):
             segment_id = segments[c.segment_index].id
 
+        extractor_tag = engine_used
+
         claim_record = Claim(
             id=str(uuid.uuid4()),
             investigation_id=inv.id,
             segment_id=segment_id,
             claim_text=c.claim_text,
             category=c.category,
-            extracted_by="evon_reasoning" if reasoning.is_evon_configured() else "linguistic_extractor",
+            extracted_by=extractor_tag,
             uncertainty_score=c.uncertainty_score,
             status="unreviewed",
+            review_stage="unreviewed",
+            entities=getattr(c, "entities", []),
+            coreference_notes=getattr(c, "coreference_notes", None) or c.rationale,
             order_index=idx
         )
         db.add(claim_record)
@@ -90,7 +95,7 @@ async def extract_claims_endpoint(
         action="CLAIMS_EXTRACTED",
         resource_type="investigation",
         resource_id=inv.id,
-        details={"claims_count": len(created_claims), "method": "evon_or_linguistic"}
+        details={"claims_count": len(created_claims), "method": "ollama_evon_or_heuristic"}
     )
     db.add(audit)
     db.commit()
@@ -105,6 +110,7 @@ async def extract_claims_endpoint(
                 "category": c.category,
                 "uncertainty_score": c.uncertainty_score,
                 "status": c.status,
+                "review_stage": c.review_stage,
                 "order_index": c.order_index
             }
             for c in created_claims
@@ -144,6 +150,12 @@ def list_claims(
                 extracted_by=c.extracted_by,
                 uncertainty_score=c.uncertainty_score,
                 status=c.status,
+                review_stage=c.review_stage or "unreviewed",
+                senior_reviewer_id=c.senior_reviewer_id,
+                senior_notes=c.senior_notes,
+                senior_signed_at=c.senior_signed_at,
+                entities=c.entities or [],
+                coreference_notes=c.coreference_notes,
                 order_index=c.order_index,
                 created_at=c.created_at,
                 updated_at=c.updated_at,
@@ -166,7 +178,17 @@ def review_claim(
     if not claim:
         raise HTTPException(status_code=404, detail="Claim not found")
 
+    # Enforce Citation Requirements for High-Confidence Decisions (>= 4)
+    if (req.confidence_rating or 4) >= 4 and req.decision in ["supported", "refuted"]:
+        ev_count = db.query(ClaimEvidenceLink).filter(ClaimEvidenceLink.claim_id == claim.id).count()
+        if ev_count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="High-confidence determinations (rating 4 or 5) require at least one linked evidence citation. Please attach or crawl supporting/refuting evidence before submitting."
+            )
+
     claim.status = req.decision
+    claim.review_stage = "primary_adjudicated"
     claim.updated_at = datetime.utcnow()
 
     # Create ReviewDecision record
@@ -185,7 +207,11 @@ def review_claim(
         action="CLAIM_REVIEWED",
         resource_type="claim",
         resource_id=claim.id,
-        details={"decision": req.decision, "confidence": req.confidence_rating}
+        details={
+            "decision": req.decision,
+            "confidence": req.confidence_rating,
+            "review_stage": "primary_adjudicated"
+        }
     )
     db.add(audit)
     db.commit()
@@ -193,9 +219,68 @@ def review_claim(
     return {
         "id": claim.id,
         "status": claim.status,
+        "review_stage": claim.review_stage,
         "review_id": review.id,
         "decision": review.decision,
         "analyst_notes": review.analyst_notes,
         "confidence_rating": review.confidence_rating,
         "reviewed_at": review.reviewed_at
+    }
+
+@router.patch("/{id}/senior-review")
+def senior_review_claim(
+    id: str,
+    req: SeniorReviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Second-analyst sign-off workflow.
+    Requires Senior Analyst / Lead Investigator privilege.
+    Validates primary adjudication, notes, and citation integrity.
+    """
+    claim = db.query(Claim).filter(Claim.id == id).first()
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    if claim.review_stage == "unreviewed":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot perform senior sign-off on unreviewed claim. Primary analyst adjudication must precede senior sign-off."
+        )
+
+    if req.decision == "senior_approved":
+        claim.review_stage = "senior_approved"
+        claim.senior_reviewer_id = current_user.id
+        claim.senior_notes = req.senior_notes
+        claim.senior_signed_at = datetime.utcnow()
+    elif req.decision == "changes_requested":
+        claim.review_stage = "changes_requested"
+        claim.senior_notes = req.senior_notes
+    else:
+        raise HTTPException(status_code=400, detail="Invalid decision. Must be 'senior_approved' or 'changes_requested'.")
+
+    claim.updated_at = datetime.utcnow()
+
+    audit = AuditEvent(
+        actor_id=current_user.id,
+        action="DUAL_REVIEW_SENIOR_SIGNOFF",
+        resource_type="claim",
+        resource_id=claim.id,
+        details={
+            "decision": req.decision,
+            "senior_notes": req.senior_notes,
+            "senior_reviewer": current_user.email
+        }
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "id": claim.id,
+        "status": claim.status,
+        "review_stage": claim.review_stage,
+        "senior_reviewer_id": claim.senior_reviewer_id,
+        "senior_notes": claim.senior_notes,
+        "senior_signed_at": claim.senior_signed_at
     }

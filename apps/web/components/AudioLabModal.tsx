@@ -31,10 +31,19 @@ export function AudioLabModal({
 }) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [language, setLanguage] = useState("indic-auto");
+  const [apply80HzFilter, setApply80HzFilter] = useState(true);
+  const [applyNormalization, setApplyNormalization] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [status, setStatus] = useState<"idle" | "uploading" | "transcribing" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  
+  // Benchmark state
+  const [showBenchmark, setShowBenchmark] = useState(false);
+  const [refText, setRefText] = useState("");
+  const [hypText, setHypText] = useState("");
+  const [benchmarkResult, setBenchmarkResult] = useState<any>(null);
+  const [isBenchmarking, setIsBenchmarking] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -99,8 +108,14 @@ export function AudioLabModal({
     setErrorMessage("");
 
     try {
-      // 1. Upload audio asset
-      const asset = await api.uploadAudio(selectedFile, investigationId, isRecording ? "microphone" : "upload");
+      // 1. Upload audio asset with DSP preprocessing
+      const asset = await api.uploadAudio(
+        selectedFile,
+        investigationId,
+        isRecording ? "microphone" : "upload",
+        apply80HzFilter,
+        applyNormalization
+      );
       
       // 2. Invoke Gnani Prisma transcription
       setStatus("transcribing");
@@ -114,6 +129,19 @@ export function AudioLabModal({
     } catch (err: any) {
       setStatus("error");
       setErrorMessage(err.message || "Failed to process audio.");
+    }
+  };
+
+  const handleBenchmark = async () => {
+    if (!refText.trim() || !hypText.trim()) return;
+    setIsBenchmarking(true);
+    try {
+      const res = await api.benchmarkAccuracy(refText, hypText);
+      setBenchmarkResult(res);
+    } catch (err: any) {
+      setErrorMessage(err.message || "Benchmark failed");
+    } finally {
+      setIsBenchmarking(false);
     }
   };
 
@@ -203,22 +231,97 @@ export function AudioLabModal({
             )}
           </div>
 
-          {/* Language Selector */}
-          <div>
-            <label className="block text-xs font-mono text-[#F6F5F1]/60 mb-1.5">
-              TARGET RECOGNITION LANGUAGE (GNANI PRISMA)
-            </label>
-            <select
-              value={language}
-              onChange={(e) => setLanguage(e.target.value)}
-              className="w-full px-3 py-2 rounded bg-[#101B2B] border border-[#1E2C3D] text-xs text-[#F6F5F1] focus:outline-none focus:border-[#2A8C85]"
+          {/* Audio Preprocessing Settings */}
+          <div className="p-3 rounded bg-[#101B2B] border border-[#1E2C3D] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono text-[#F6F5F1]/80 font-medium">AUDIO DSP PREPROCESSING</span>
+              <span className="text-[10px] font-mono text-[#2A8C85] bg-[#2A8C85]/10 px-1.5 py-0.5 rounded border border-[#2A8C85]/30">16kHz Mono PCM</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={apply80HzFilter}
+                  onChange={(e) => setApply80HzFilter(e.target.checked)}
+                  className="rounded border-[#1E2C3D] text-[#2A8C85] focus:ring-0 bg-[#0B121D]"
+                />
+                <span className="text-xs text-[#F6F5F1]/70">80Hz High-Pass Filter</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={applyNormalization}
+                  onChange={(e) => setApplyNormalization(e.target.checked)}
+                  className="rounded border-[#1E2C3D] text-[#2A8C85] focus:ring-0 bg-[#0B121D]"
+                />
+                <span className="text-xs text-[#F6F5F1]/70">Peak Normalization (-1dB)</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Benchmark WER / CER Toggle */}
+          <div className="border-t border-[#1E2C3D] pt-3">
+            <button
+              type="button"
+              onClick={() => setShowBenchmark(!showBenchmark)}
+              className="text-xs font-mono text-[#2A8C85] hover:underline flex items-center gap-1.5"
             >
-              {LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code} className="bg-[#0B121D]">
-                  {l.label}
-                </option>
-              ))}
-            </select>
+              <span>{showBenchmark ? "Hide" : "Show"} Transcription Accuracy Benchmark (WER & CER)</span>
+            </button>
+
+            {showBenchmark && (
+              <div className="mt-3 p-3 rounded bg-[#0A1017] border border-[#1E2C3D] space-y-2.5">
+                <div>
+                  <label className="block text-[10px] font-mono text-[#F6F5F1]/60 mb-1">REFERENCE TRUTH TEXT</label>
+                  <textarea
+                    rows={2}
+                    value={refText}
+                    onChange={(e) => setRefText(e.target.value)}
+                    placeholder="Enter official ground truth speech transcript..."
+                    className="w-full p-2 text-xs bg-[#101B2B] border border-[#1E2C3D] rounded text-[#F6F5F1] focus:outline-none focus:border-[#2A8C85]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono text-[#F6F5F1]/60 mb-1">HYPOTHESIS TRANSCRIPT</label>
+                  <textarea
+                    rows={2}
+                    value={hypText}
+                    onChange={(e) => setHypText(e.target.value)}
+                    placeholder="Enter transcribed output text to benchmark..."
+                    className="w-full p-2 text-xs bg-[#101B2B] border border-[#1E2C3D] rounded text-[#F6F5F1] focus:outline-none focus:border-[#2A8C85]"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleBenchmark}
+                  disabled={isBenchmarking || !refText.trim() || !hypText.trim()}
+                  className="w-full py-1.5 bg-[#18263A] hover:bg-[#1E2C3D] border border-[#1E2C3D] text-[#2A8C85] text-xs font-mono rounded transition-colors disabled:opacity-40"
+                >
+                  {isBenchmarking ? "Evaluating Levenshtein Alignments..." : "Calculate WER & CER Metrics"}
+                </button>
+
+                {benchmarkResult && (
+                  <div className="grid grid-cols-4 gap-2 pt-2 border-t border-[#1E2C3D]/60 text-center font-mono">
+                    <div className="p-1.5 rounded bg-[#101B2B]">
+                      <div className="text-[10px] text-[#F6F5F1]/50">WER</div>
+                      <div className="text-xs font-semibold text-[#E5A93C]">{(benchmarkResult.wer * 100).toFixed(1)}%</div>
+                    </div>
+                    <div className="p-1.5 rounded bg-[#101B2B]">
+                      <div className="text-[10px] text-[#F6F5F1]/50">CER</div>
+                      <div className="text-xs font-semibold text-[#2A8C85]">{(benchmarkResult.cer * 100).toFixed(1)}%</div>
+                    </div>
+                    <div className="p-1.5 rounded bg-[#101B2B]">
+                      <div className="text-[10px] text-[#F6F5F1]/50">SUB/DEL</div>
+                      <div className="text-xs text-[#F6F5F1]">{benchmarkResult.word_substitutions}/{benchmarkResult.word_deletions}</div>
+                    </div>
+                    <div className="p-1.5 rounded bg-[#101B2B]">
+                      <div className="text-[10px] text-[#F6F5F1]/50">REF WORDS</div>
+                      <div className="text-xs text-[#F6F5F1]">{benchmarkResult.reference_word_count}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Error Banner */}

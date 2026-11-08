@@ -16,7 +16,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False)
-    role = Column(String(50), default="analyst")  # analyst, senior_researcher, admin, auditor
+    role = Column(String(50), default="analyst")  # analyst, senior_analyst, senior_researcher, admin, auditor
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -82,6 +82,7 @@ class AudioAsset(Base):
     investigation_id = Column(String(36), ForeignKey("investigations.id"), nullable=False)
     filename = Column(String(255), nullable=False)
     file_path = Column(String(500), nullable=False)
+    preprocessed_path = Column(String(500), nullable=True)
     mime_type = Column(String(100), nullable=False)
     size_bytes = Column(Integer, nullable=False)
     duration_seconds = Column(Float, nullable=True)
@@ -89,6 +90,8 @@ class AudioAsset(Base):
     channels = Column(Integer, nullable=True)
     sha256_hash = Column(String(64), nullable=True)
     source_type = Column(String(50), default="upload")  # upload, microphone, sample
+    highpass_80hz_applied = Column(Boolean, default=False)
+    peak_normalized = Column(Boolean, default=False)
     waveform_data = Column(JSON, nullable=True)  # array of normalized float amplitudes for UI
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -108,6 +111,8 @@ class TranscriptionJob(Base):
     status = Column(String(50), default="pending")  # pending, processing, completed, failed
     error_message = Column(Text, nullable=True)
     execution_time_ms = Column(Integer, nullable=True)
+    wer_score = Column(Float, nullable=True)
+    cer_score = Column(Float, nullable=True)
     raw_response = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
@@ -156,9 +161,15 @@ class Claim(Base):
     segment_id = Column(String(36), ForeignKey("transcript_segments.id"), nullable=True)
     claim_text = Column(Text, nullable=False)
     category = Column(String(100), default="factual_assertion")  # statistical, policy, event, historical, quote
-    extracted_by = Column(String(50), default="evon_reasoning")  # evon_reasoning, heuristic_extractor, analyst
+    extracted_by = Column(String(50), default="evon_reasoning")  # evon_reasoning, ollama, heuristic_extractor, analyst
     uncertainty_score = Column(Float, default=0.2)  # 0.0 to 1.0 (epistemic uncertainty)
     status = Column(String(50), default="unreviewed")  # unreviewed, verified_supported, refuted, inconclusive, context_missing
+    review_stage = Column(String(50), default="unreviewed")  # unreviewed, primary_adjudicated, senior_approved, changes_requested
+    senior_reviewer_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    senior_notes = Column(Text, nullable=True)
+    senior_signed_at = Column(DateTime, nullable=True)
+    entities = Column(JSON, default=list)  # extracted named entities (organizations, locations, amounts)
+    coreference_notes = Column(Text, nullable=True)  # cross-sentence context resolution
     order_index = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -176,11 +187,15 @@ class EvidenceSource(Base):
     source_type = Column(String(50), default="web")  # web, government_gazette, official_data, court_record, archival
     title = Column(String(500), nullable=False)
     url = Column(String(1000), nullable=True)
+    canonical_url = Column(String(1000), nullable=True)
     publisher = Column(String(255), nullable=True)
+    author = Column(String(255), nullable=True)
     publication_date = Column(DateTime, nullable=True)
     retrieval_date = Column(DateTime, default=datetime.utcnow)
     excerpt = Column(Text, nullable=True)
     reliability_tier = Column(String(50), default="primary_verified")  # primary_verified, secondary_reputable, unverified_claim
+    provenance_sha256 = Column(String(64), nullable=True)
+    text_fingerprint = Column(String(64), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -225,6 +240,9 @@ class Report(Base):
     methodology = Column(Text, nullable=True)
     limitations = Column(Text, nullable=True)
     verdict_summary = Column(JSON, nullable=True)
+    approval_status = Column(String(50), default="draft")  # draft, under_senior_review, senior_approved, published
+    approver_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
     report_json = Column(JSON, nullable=True)
     audio_briefing_path = Column(String(500), nullable=True)  # Timbre-generated audio file path
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -236,7 +254,7 @@ class ProviderUsage(Base):
     __tablename__ = "provider_usages"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
-    provider = Column(String(50), nullable=False)  # gnani_prisma, gnani_timbre, evon_reasoning
+    provider = Column(String(50), nullable=False)  # gnani_prisma, gnani_timbre, ollama_reasoning, evon_reasoning
     endpoint = Column(String(255), nullable=False)
     characters_or_seconds = Column(Float, nullable=False)
     estimated_units = Column(Float, default=0.0)
@@ -250,7 +268,7 @@ class AuditEvent(Base):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     actor_id = Column(String(36), ForeignKey("users.id"), nullable=True)
-    action = Column(String(100), nullable=False)  # e.g. AUDIO_UPLOADED, TRANSCRIPTION_STARTED, CLAIM_REVIEWED
+    action = Column(String(100), nullable=False)  # e.g. AUDIO_UPLOADED, TRANSCRIPTION_STARTED, CLAIM_REVIEWED, DUAL_REVIEW_APPROVED
     resource_type = Column(String(100), nullable=False)
     resource_id = Column(String(255), nullable=True)
     details = Column(JSON, nullable=True)
