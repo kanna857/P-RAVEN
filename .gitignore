@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+*.db
+*.sqlite3
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+build/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Uploads & Temp
+uploads/*.wav
+uploads/*.mp3
+uploads/*.m4a
+!uploads/.gitkeep
+uploads/briefings/*.wav
+
+# IDE
+.vscode/
+.idea/
+*.swp

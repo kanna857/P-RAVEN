@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  raven-api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: raven-api
+    ports:
+      - "8000:8000"
+    environment:
+      - GNANI_API_KEY=${GNANI_API_KEY:-}
+      - GNANI_BASE_URL=${GNANI_BASE_URL:-https://api.vachana.ai}
+      - GNANI_PRISMA_MODEL=${GNANI_PRISMA_MODEL:-prisma-v3.0}
+      - GNANI_TIMBRE_MODEL=${GNANI_TIMBRE_MODEL:-timbre-v2.5}
+      - EVON_BASE_URL=${EVON_BASE_URL:-}
+      - SECRET_KEY=${SECRET_KEY:-raven-docker-secret-2026}
+      - DATABASE_URL=sqlite:///./raven.db
+      - DEMO_MODE_ALLOWED=true
+    volumes:
+      - raven-uploads:/app/uploads
+      - raven-db:/app/raven.db
+    restart: unless-stopped
+
+  raven-web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+    container_name: raven-web
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api
+    depends_on:
+      - raven-api
+    restart: unless-stopped
+
+volumes:
+  raven-uploads:
+  raven-db:
